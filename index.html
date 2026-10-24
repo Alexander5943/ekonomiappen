@@ -115,6 +115,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .empty { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; color: var(--muted); }
 .empty p { margin: 0; }
 
+/* månadsväljare */
+.monthnav { display: flex; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+.monthnav strong { font-family: var(--font-display); font-size: 17px; min-width: 9em; text-align: center; text-transform: capitalize; }
+.navbtn { font: inherit; font-size: 20px; line-height: 1; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.navbtn:hover { border-color: var(--accent); color: var(--accent); }
+.navbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.copy { align-self: flex-start; padding: 6px 14px; font-size: 13px; }
 /* ränta på ränta */
 .calc { display: flex; flex-direction: column; gap: 16px; }
 .slide { display: flex; flex-direction: column; gap: 6px; }
@@ -144,7 +151,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 <div class="app">
   <header>
     <h1 id="title">Din ekonomi</h1>
-    <p class="sub">Lägg in vad du tjänar och vad du betalar varje månad. Appen räknar ut resten.</p>
+    <p class="sub">Planera en månad i taget. Lägg in det du tjänar och betalar just den månaden.</p>
+    <div class="monthnav"><button class="navbtn" id="m-prev" type="button" aria-label="Föregående månad">‹</button><strong id="m-label"></strong><button class="navbtn" id="m-next" type="button" aria-label="Nästa månad">›</button><button class="ghost" id="m-today" type="button" hidden>Idag</button></div>
     <div class="notice" id="notice" hidden></div>
   </header>
 
@@ -164,7 +172,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   </div>
 
   <section>
-    <div class="head"><h2>Lägg till</h2><span>Upprepas varje månad</span></div>
+    <div class="head"><h2>Lägg till</h2><span id="addnote"></span></div>
     <div class="card">
       <form id="form" autocomplete="off">
         <div class="full seg" role="radiogroup" aria-label="Typ">
@@ -186,8 +194,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   </section>
 
   <section>
-    <div class="head"><h2>Betalningar denna månad</h2><span id="todaylbl"></span></div>
+    <div class="head"><h2 id="paytitle">Betalningar</h2><span id="todaylbl"></span></div>
     <div class="card"><ul id="pays"></ul></div>
+    <button class="ghost copy" id="copy-prev" type="button" hidden></button>
   </section>
 
   <section id="cat-section">
@@ -237,14 +246,16 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 <script>
 var MONTHS = ["januari","februari","mars","april","maj","juni","juli","augusti","september","oktober","november","december"];
 var now = new Date();
-var MONTH_KEY = now.getFullYear() + "-" + (now.getMonth() + 1);
 var TODAY = now.getDate();
-var DAYS_IN_MONTH = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+var NOW_IDX = now.getFullYear() * 12 + now.getMonth();
+var viewY = now.getFullYear(), viewM = now.getMonth();
+var monthKey = function (y, m) { return y + "-" + (m + 1); };
+var daysIn = function (y, m) { return new Date(y, m + 1, 0).getDate(); };
 var kr = function (n) { return Math.round(n).toLocaleString("sv-SE").replace(/ /g, " ") + " kr"; };
 var $ = function (id) { return document.getElementById(id); };
 var esc = function (s) { var d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
 
-var state = { items: [], paid: {} };   // items: {id, kind, name, amt, day, cat}  paid: {"2026-10": [id, ...]}
+var state = { months: {} };   // months: {"2026-10": { items: [{id, kind, name, amt, day, cat}], paid: [id, ...] }}
 var reduce = {};                        // id -> 0, 0.5 eller 1 (bara i sidan, sparas inte)
 
 var EXAMPLES = [
@@ -265,11 +276,21 @@ function persist() {
     $("notice").hidden = false;
   }
 }
+function cur() {
+  var k = monthKey(viewY, viewM);
+  var m = state.months[k];
+  if (!m) m = state.months[k] = { items: [], paid: [] };
+  return m;
+}
+function peek(y, m) { return state.months[monthKey(y, m)]; }
+function prevOf(y, m) { return m === 0 ? [y - 1, 11] : [y, m - 1]; }
 function uid() { return "i" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
 function render() {
-  var ins = state.items.filter(function (i) { return i.kind === "in"; });
-  var outs = state.items.filter(function (i) { return i.kind === "out"; });
+  var items = cur().items;
+  updateHeader();
+  var ins = items.filter(function (i) { return i.kind === "in"; });
+  var outs = items.filter(function (i) { return i.kind === "out"; });
   var income = ins.reduce(function (a, i) { return a + i.amt; }, 0);
   var exp = outs.reduce(function (a, i) { return a + i.amt; }, 0);
   var left = income - exp;
@@ -293,24 +314,31 @@ function render() {
 function renderPays() {
   var ul = $("pays");
   ul.innerHTML = "";
-  if (!state.items.length) {
+  var mon = cur();
+  var items = mon.items;
+  var rel = viewY * 12 + viewM - NOW_IDX;   // negativ = tidigare månad, 0 = nu, positiv = senare
+  var dim = daysIn(viewY, viewM);
+  if (!items.length) {
     var li = document.createElement("li");
     li.className = "empty";
-    li.innerHTML = '<p>Inget inlagt än. Börja med din lön och dina fasta utgifter i formuläret ovan.</p><button class="ghost" type="button" id="load-ex">Fyll i exempel</button>';
+    li.innerHTML = '<p>Inget inlagt för ' + MONTHS[viewM] + ' än. Lägg in din lön och dina utgifter i formuläret ovan.</p>' +
+      '<button class="ghost" type="button" id="load-ex">Fyll i exempel</button>';
     ul.appendChild(li);
     return;
   }
-  var paid = state.paid[MONTH_KEY] || [];
-  var sorted = state.items.slice().sort(function (a, b) {
+  var paid = mon.paid;
+  var sorted = items.slice().sort(function (a, b) {
     var pa = paid.indexOf(a.id) >= 0 ? 1 : 0, pb = paid.indexOf(b.id) >= 0 ? 1 : 0;
-    return pa - pb || Math.min(a.day, DAYS_IN_MONTH) - Math.min(b.day, DAYS_IN_MONTH);
+    return pa - pb || Math.min(a.day, dim) - Math.min(b.day, dim);
   });
   sorted.forEach(function (p) {
-    var day = Math.min(p.day, DAYS_IN_MONTH);
+    var day = Math.min(p.day, dim);
     var isPaid = paid.indexOf(p.id) >= 0;
     var diff = day - TODAY;
     var chipText, soon = false;
     if (isPaid) chipText = p.kind === "in" ? "Mottagen" : "Betald";
+    else if (rel > 0) chipText = "Den " + day + ":e";
+    else if (rel < 0) { chipText = "Ej markerad"; soon = true; }
     else if (diff < 0) { chipText = p.kind === "in" ? "Skulle komma" : "Förfallen"; soon = true; }
     else if (diff === 0) { chipText = "Idag"; soon = p.kind === "out"; }
     else if (diff === 1) { chipText = "Imorgon"; soon = p.kind === "out"; }
@@ -318,7 +346,7 @@ function renderPays() {
     var li = document.createElement("li");
     li.className = "pay" + (p.kind === "in" ? " in" : "") + (isPaid ? " done" : "");
     li.innerHTML =
-      '<div class="date"><b>' + day + '</b><small>' + MONTHS[now.getMonth()].slice(0, 3) + '</small></div>' +
+      '<div class="date"><b>' + day + '</b><small>' + MONTHS[viewM].slice(0, 3) + '</small></div>' +
       '<div><div class="name">' + esc(p.name) + '</div><div class="meta"><span class="chip' + (soon ? " soon" : "") + '">' + chipText + '</span><span>' + esc(p.cat) + '</span>' +
       '<button class="ghost" type="button" data-act="paid" data-id="' + p.id + '">' + (isPaid ? "Ångra" : (p.kind === "in" ? "Markera mottagen" : "Markera betald")) + '</button>' +
       '<button class="ghost del" type="button" data-act="del" data-id="' + p.id + '" aria-label="Ta bort ' + esc(p.name) + '">Ta bort</button></div></div>' +
@@ -354,7 +382,7 @@ function renderTips(outs) {
     li.className = "tip";
     var v = reduce[o.id] || 0;
     li.innerHTML =
-      '<div><div class="name">' + esc(o.name) + '</div><div class="meta"><span class="num">' + kr(o.amt) + ' / månad</span><span>' + esc(o.cat) + '</span></div></div>' +
+      '<div><div class="name">' + esc(o.name) + '</div><div class="meta"><span class="num">' + kr(o.amt) + '</span><span>' + esc(o.cat) + '</span></div></div>' +
       '<select data-id="' + o.id + '" aria-label="Minska ' + esc(o.name) + '">' +
       '<option value="0"' + (v === 0 ? " selected" : "") + '>Behåll</option>' +
       '<option value="0.5"' + (v === 0.5 ? " selected" : "") + '>Halvera</option>' +
@@ -365,24 +393,25 @@ function renderTips(outs) {
 }
 function updateSaving() {
   var sum = 0;
-  state.items.forEach(function (o) { if (o.kind === "out" && reduce[o.id]) sum += o.amt * reduce[o.id]; });
-  $("save-m").textContent = kr(sum) + " / månad";
-  $("save-y").textContent = kr(sum * 12) + " på ett år";
+  cur().items.forEach(function (o) { if (o.kind === "out" && reduce[o.id]) sum += o.amt * reduce[o.id]; });
+  $("save-m").textContent = kr(sum) + " den här månaden";
+  $("save-y").textContent = kr(sum * 12) + " på ett år om du sparar lika mycket varje månad";
 }
 
 $("pays").addEventListener("click", function (e) {
   if (e.target.id === "load-ex") {
-    EXAMPLES.forEach(function (x) { var c = JSON.parse(JSON.stringify(x)); c.id = uid(); state.items.push(c); });
+    EXAMPLES.forEach(function (x) { var c = JSON.parse(JSON.stringify(x)); c.id = uid(); cur().items.push(c); });
     persist(); render(); return;
   }
   var b = e.target.closest("button[data-act]");
   if (!b) return;
   var id = b.dataset.id;
   if (b.dataset.act === "del") {
-    state.items = state.items.filter(function (i) { return i.id !== id; });
+    cur().items = cur().items.filter(function (i) { return i.id !== id; });
+    cur().paid = cur().paid.filter(function (x) { return x !== id; });
     delete reduce[id];
   } else {
-    var arr = state.paid[MONTH_KEY] || (state.paid[MONTH_KEY] = []);
+    var arr = cur().paid;
     var at = arr.indexOf(id);
     if (at >= 0) arr.splice(at, 1); else arr.push(id);
   }
@@ -399,7 +428,7 @@ $("form").addEventListener("submit", function (e) {
   var amt = parseFloat($("f-amt").value), day = parseInt($("f-day").value, 10), name = $("f-name").value.trim();
   if (!name || !(amt >= 0) || !(day >= 1 && day <= 31)) return;
   var kind = document.querySelector('input[name="kind"]:checked').value;
-  state.items.push({ id: uid(), kind: kind, name: name, amt: amt, day: day, cat: kind === "in" ? "Övrigt" : $("f-cat").value });
+  cur().items.push({ id: uid(), kind: kind, name: name, amt: amt, day: day, cat: kind === "in" ? "Övrigt" : $("f-cat").value });
   persist(); render();
   $("f-name").value = ""; $("f-amt").value = ""; $("f-day").value = "";
   $("f-name").focus();
@@ -408,14 +437,53 @@ Array.prototype.forEach.call(document.querySelectorAll('input[name="kind"]'), fu
   r.addEventListener("change", function () { $("f-cat").disabled = document.querySelector('input[name="kind"]:checked').value === "in"; });
 });
 
-$("title").textContent = "Din ekonomi i " + MONTHS[now.getMonth()];
-$("todaylbl").textContent = "Idag är det den " + TODAY + " " + MONTHS[now.getMonth()];
-render();
+function updateHeader() {
+  var rel = viewY * 12 + viewM - NOW_IDX;
+  $("m-label").textContent = MONTHS[viewM] + " " + viewY;
+  $("title").textContent = "Din ekonomi i " + MONTHS[viewM];
+  $("paytitle").textContent = "Betalningar i " + MONTHS[viewM];
+  $("addnote").textContent = "Gäller bara " + MONTHS[viewM];
+  $("todaylbl").textContent = rel === 0 ? "Idag är det den " + TODAY + " " + MONTHS[viewM] : "";
+  $("m-today").hidden = rel === 0;
+  var p = prevOf(viewY, viewM), pm = peek(p[0], p[1]);
+  var have = cur().items.map(function (i) { return i.kind + "|" + i.name.toLowerCase(); });
+  var copyable = pm ? pm.items.filter(function (i) { return have.indexOf(i.kind + "|" + i.name.toLowerCase()) < 0; }) : [];
+  var btn = $("copy-prev");
+  btn.hidden = !copyable.length;
+  btn.textContent = "Kopiera " + copyable.length + (copyable.length === 1 ? " post" : " poster") + " från " + MONTHS[p[1]];
+}
+function go(delta) {
+  var idx = viewY * 12 + viewM + delta;
+  viewY = Math.floor(idx / 12); viewM = idx % 12;
+  render();
+}
+$("m-prev").addEventListener("click", function () { go(-1); });
+$("m-next").addEventListener("click", function () { go(1); });
+$("m-today").addEventListener("click", function () { go(NOW_IDX - (viewY * 12 + viewM)); });
+$("copy-prev").addEventListener("click", function () {
+  var p = prevOf(viewY, viewM), pm = peek(p[0], p[1]);
+  if (!pm) return;
+  var have = cur().items.map(function (i) { return i.kind + "|" + i.name.toLowerCase(); });
+  pm.items.forEach(function (i) {
+    if (have.indexOf(i.kind + "|" + i.name.toLowerCase()) >= 0) return;
+    var c = JSON.parse(JSON.stringify(i)); c.id = uid(); cur().items.push(c);
+  });
+  persist(); render();
+});
 
 try {
   var saved = JSON.parse(localStorage.getItem("ekonomiappen") || "null");
-  if (saved && Array.isArray(saved.items)) { state = { items: saved.items, paid: saved.paid || {} }; render(); }
+  if (saved && saved.months && typeof saved.months === "object") {
+    state = { months: saved.months };
+  } else if (saved && Array.isArray(saved.items)) {
+    // äldre version: allt gällde varje månad. Posterna läggs i innevarande månad.
+    var k0 = monthKey(now.getFullYear(), now.getMonth());
+    state = { months: {} };
+    state.months[k0] = { items: saved.items, paid: (saved.paid && saved.paid[k0]) || [] };
+    persist();
+  }
 } catch (e) {}
+render();
 /* ränta på ränta */
 (function () {
   var MAX_START = 10000000, MAX_MONTH = 1000000, POW = 3;
